@@ -1,0 +1,136 @@
+import numpy as np
+import matplotlib.pyplot as plt
+from skimage.metrics import structural_similarity as ssim
+from skimage import io, transform, img_as_float
+import os
+import csv
+
+# ==========================================
+# CONFIGURATION
+# ==========================================
+# Пары файлов: (Синтетический эталон, Реальный скан)
+PAIRS = {
+    'Structural': ('OutputImage2.png',   'Real_OCT.png'),       # Structural
+    'OAC':        ('OutputImageOAC.png', 'Real_OAC_SSIM.png'),  # OAC
+    'SC':         ('OutputImageSC.png',  'Real_SC_SSIM.png'),   # SC
+    'RSC':        ('OutputImageRSC.png', 'Real_RSC_SSIM.png')   # RSC
+}
+
+OUTPUT_CSV = 'SSIM_Metrics.csv'
+
+def load_and_prep_image(path, target_shape=None):
+    """
+    Загружает изображение, переводит в grayscale (0-1),
+    и при необходимости меняет размер под эталон.
+    """
+    if not os.path.exists(path):
+        print(f"Error: File {path} not found.")
+        return None
+
+    # Загрузка как grayscale (значения 0..1 или 0..255)
+    img = io.imread(path, as_gray=True)
+    
+    # Конвертация в float 0..1
+    img = img_as_float(img)
+    
+    # Нормализация гистограммы на 0..1 для корректного сравнения структур
+    if img.max() > 0:
+        img = (img - img.min()) / (img.max() - img.min())
+    
+    # Ресайз, если задан целевой размер
+    if target_shape is not None and img.shape != target_shape:
+        img = transform.resize(img, target_shape, anti_aliasing=True)
+        img = np.clip(img, 0, 1)
+        
+    return img
+
+def calculate_metrics(diff_map):
+    """
+    Считает статистику по карте SSIM.
+    """
+    stats = {}
+    stats['mean'] = np.mean(diff_map)
+    stats['std'] = np.std(diff_map)
+    stats['median'] = np.median(diff_map)
+    
+    # 95% интервал (отсекаем 2.5% снизу и 2.5% сверху)
+    stats['p2_5'] = np.percentile(diff_map, 2.5)
+    stats['p97_5'] = np.percentile(diff_map, 97.5)
+    
+    return stats
+
+def main():
+    print("Starting SSIM Comparison...")
+    print("-" * 80)
+    # Заголовок для консоли
+    print(f"{'Metric':<12} | {'Mean':<8} | {'Std':<8} | {'Median':<8} | {'95% Interval':<15}")
+    print("-" * 80)
+
+    # Список для сбора данных для CSV
+    csv_data = []
+
+    for label, (synth_path, real_path) in PAIRS.items():
+        # 1. Загружаем синтетику (Эталон)
+        img_synth = load_and_prep_image(synth_path)
+        if img_synth is None: continue
+            
+        # 2. Загружаем реальное и подгоняем под размер синтетики
+        img_real = load_and_prep_image(real_path, target_shape=img_synth.shape)
+        if img_real is None: continue
+
+        # 3. Считаем SSIM
+        # win_size=11 - стандарт, data_range=1.0 (так как float)
+        score, diff_map = ssim(img_synth, img_real, 
+                               full=True, 
+                               win_size=11, 
+                               data_range=1.0)
+
+        # 4. Статистика
+        st = calculate_metrics(diff_map)
+        
+        # 5. Вывод в консоль (красиво)
+        interval_str = f"[{st['p2_5']:.3f}, {st['p97_5']:.3f}]"
+        print(f"{label:<12} | {st['mean']:.4f}   | {st['std']:.4f}   | {st['median']:.4f}   | {interval_str:<15}")
+
+        # 6. Сбор данных для CSV (максимальная точность)
+        csv_data.append({
+            'Metric': label,
+            'Mean': st['mean'],
+            'Std': st['std'],
+            'Median': st['median'],
+            'Interval_Lower_2.5%': st['p2_5'],
+            'Interval_Upper_97.5%': st['p97_5']
+        })
+
+        # 7. Сохранение карты SSIM
+        plt.figure(figsize=(10, 6))
+        plt.imshow(diff_map, cmap='inferno', vmin=0, vmax=1, aspect='auto')
+        plt.colorbar(label='SSIM Value')
+        plt.title(f'SSIM Map: {label}\nMean: {st["mean"]:.3f}, Median: {st["median"]:.3f}')
+        
+        output_filename = f'SSIM_Map_{label}.png'
+        plt.savefig(output_filename)
+        plt.close()
+        
+    print("-" * 80)
+    
+    # 8. Запись в CSV файл
+    if csv_data:
+        try:
+            with open(OUTPUT_CSV, 'w', newline='') as csvfile:
+                fieldnames = ['Metric', 'Mean', 'Std', 'Median', 'Interval_Lower_2.5%', 'Interval_Upper_97.5%']
+                writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+
+                writer.writeheader()
+                for row in csv_data:
+                    writer.writerow(row)
+            print(f"Successfully saved metrics to '{OUTPUT_CSV}'")
+        except IOError as e:
+            print(f"Error saving CSV: {e}")
+    else:
+        print("No data to save.")
+
+    print("SSIM Maps saved as 'SSIM_Map_*.png'")
+
+if __name__ == '__main__':
+    main()

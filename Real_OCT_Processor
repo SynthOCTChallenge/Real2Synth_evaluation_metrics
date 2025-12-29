@@ -1,0 +1,177 @@
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.ndimage import uniform_filter
+import os
+import time
+
+# ==========================================
+# CONFIGURATION
+# ==========================================
+INPUT_FILENAME = 'Real_OCT.png'  # Input real OCT-scan
+HPX = 4.0                        # Pixel size (micrometers)
+WINDOW_SIZE = 20                 # 2D window size for SC/RSC calculation (20 means 20x20 window)
+
+# ==========================================
+# ALGORITHMS (Identical to Generator)
+# ==========================================
+
+def calculate_oac(intensity, h_px):
+    """
+    Calculates Optical Attenuation Coefficient (OAC).
+    Input: Linear Intensity.
+    """
+    epsilon = 1e-10
+    
+    # Reverse cumulative sum along DEPTH (axis 0)
+    I_rev = intensity[::-1, :]
+    cumsum_rev = np.cumsum(I_rev, axis=0)
+    cumsum_from_bottom = cumsum_rev[::-1, :]
+    
+    # Denominator term
+    denom_term = cumsum_from_bottom - 0.5 * intensity
+    
+    # Formula (2)
+    mu = intensity / (2 * h_px * (denom_term + epsilon))
+    
+    return mu
+
+def calculate_speckle_contrast_map(data, window_size=20):
+    """
+    Calculates Speckle Contrast map using sliding window (stride 1).
+    """
+    mean_val = uniform_filter(data, size=window_size, mode='reflect')
+    mean_sq_val = uniform_filter(data**2, size=window_size, mode='reflect')
+    
+    var_val = mean_sq_val - mean_val**2
+    var_val[var_val < 0] = 0 
+    std_val = np.sqrt(var_val)
+    
+    sc_map = std_val / (mean_val + 1e-10)
+    
+    # Crop borders
+    border = window_size // 2
+    sc_map_cropped = sc_map[border:-border, border:-border]
+    
+    return sc_map_cropped
+
+def load_and_linearize_image(filename):
+    """
+    Loads PNG and restores Linear Intensity assuming:
+    PNG = Normalize(20 * log10(Amplitude)) over 40dB range.
+    
+    Math:
+    Pixel (0..1) corresponds to 0..40 dB.
+    dB = Pixel * 40
+    Amplitude = 10^(dB / 20) = 10^(Pixel * 2)
+    Intensity = Amplitude^2 = 10^(Pixel * 4)
+    """
+    if not os.path.exists(filename):
+        raise FileNotFoundError(f"File {filename} not found.")
+        
+    # 1. Load image
+    img = plt.imread(filename)
+    
+    # 2. Handle RGB/RGBA -> Grayscale
+    if img.ndim == 3:
+        # If 4 channels (RGBA), ignore Alpha
+        if img.shape[2] == 4:
+            img = img[:, :, :3]
+        # Mean of RGB
+        img = np.mean(img, axis=2)
+    
+    # 3. Normalize to 0..1 (if uint8)
+    if img.max() > 1.0:
+        img = img / 255.0
+        
+    # 4. Linearization: I = 10^(4 * P)
+    intensity = 10.0 ** (img * 4.0)
+    
+    return intensity
+
+# ==========================================
+# MAIN PROCESSING
+# ==========================================
+
+def main():
+    print(f"Processing {INPUT_FILENAME}...")
+    start_time = time.time()
+
+    # 1. Load and Linearize
+    try:
+        intensity_linear = load_and_linearize_image(INPUT_FILENAME)
+    except Exception as e:
+        print(f"Error: {e}")
+        return
+
+    print(f"Image loaded. Shape: {intensity_linear.shape}")
+
+    # ==========================================
+    # OAC Map
+    # ==========================================
+    print("Calculating OAC...")
+    mu_map = calculate_oac(intensity_linear, HPX)
+    
+    # Limits (Min to 99th percentile)
+    vmin_oac = np.min(mu_map)
+    vmax_oac = np.percentile(mu_map, 99)
+    
+    # Save Visual
+    plt.figure(figsize=(10, 6))
+    plt.imshow(mu_map, aspect='auto', cmap='jet', origin='upper', vmin=vmin_oac, vmax=vmax_oac)
+    plt.colorbar(label='Attenuation Coefficient (mu)')
+    plt.title('Real OAC Map')
+    plt.savefig('Real_OAC_vis.png')
+    plt.close()
+    
+    # Save SSIM-ready
+    mu_norm = np.clip((mu_map - vmin_oac) / (vmax_oac - vmin_oac + 1e-10), 0, 1)
+    plt.imsave('Real_OAC_SSIM.png', mu_norm, cmap='gray')
+
+    # ==========================================
+    # Speckle Contrast (SC)
+    # ==========================================
+    print("Calculating SC...")
+    # SC on Intensity
+    sc_map = calculate_speckle_contrast_map(intensity_linear, window_size=WINDOW_SIZE)
+    
+    # Limits (0.5 to 5.0)
+    sc_map = np.clip(sc_map, 0.5, 5.0)
+    
+    # Save Visual
+    plt.figure(figsize=(10, 6))
+    plt.imshow(sc_map, aspect='auto', cmap='viridis', origin='upper', vmin=0.5, vmax=5.0)
+    plt.colorbar(label='Speckle Contrast')
+    plt.title('Real SC Map')
+    plt.savefig('Real_SC_vis.png')
+    plt.close()
+    
+    # Save SSIM-ready
+    sc_norm = (sc_map - 0.5) / (5.0 - 0.5)
+    plt.imsave('Real_SC_SSIM.png', sc_norm, cmap='gray')
+
+    # ==========================================
+    # Refined Speckle Contrast (RSC)
+    # ==========================================
+    print("Calculating RSC...")
+    # RSC on OAC (Corrected Intensity)
+    rsc_map = calculate_speckle_contrast_map(mu_map, window_size=WINDOW_SIZE)
+    
+    # Limits (0.5 to 5.0)
+    rsc_map = np.clip(rsc_map, 0.5, 5.0)
+    
+    # Save Visual
+    plt.figure(figsize=(10, 6))
+    plt.imshow(rsc_map, aspect='auto', cmap='viridis', origin='upper', vmin=0.5, vmax=5.0)
+    plt.colorbar(label='Refined Speckle Contrast')
+    plt.title('Real RSC Map')
+    plt.savefig('Real_RSC_vis.png')
+    plt.close()
+    
+    # Save SSIM-ready
+    rsc_norm = (rsc_map - 0.5) / (5.0 - 0.5)
+    plt.imsave('Real_RSC_SSIM.png', rsc_norm, cmap='gray')
+
+    print(f"Done. Execution time: {time.time() - start_time:.2f}s")
+
+if __name__ == '__main__':
+    main()
